@@ -31,6 +31,7 @@ SCRIPT_PATH = Path(__file__).resolve()
 ROOT = discover_project_root(SCRIPT_PATH)
 BACKEND_DOCKERFILE = "backend/Dockerfile"
 FRONTEND_DOCKERFILE = "frontend/Dockerfile"
+FRONTEND_NGINX_CONF = "frontend/nginx.conf"
 MIGRATION_NAME = "20260801_0100_add_formatting_subsystem.py"
 MIGRATION_PLACEHOLDER = "REPLACE_WITH_CURRENT_HEAD"
 EXPECTED_SERVICE_COUNT = 16
@@ -1108,8 +1109,12 @@ def _validate_gateway_hardening(services: dict[str, Any]) -> list[str]:
 def _validate_proxy_contract(root: Path) -> list[str]:
     errors: list[str] = []
     backend_path = root / BACKEND_DOCKERFILE
-    frontend_path = root / FRONTEND_DOCKERFILE
-    if not backend_path.is_file() or not frontend_path.is_file():
+    frontend_dockerfile_path = root / FRONTEND_DOCKERFILE
+    nginx_path = root / FRONTEND_NGINX_CONF
+    if not backend_path.is_file() or not frontend_dockerfile_path.is_file():
+        return errors
+    if not nginx_path.is_file():
+        errors.append("frontend Nginx config (frontend/nginx.conf) is missing")
         return errors
 
     backend = backend_path.read_text(encoding="utf-8", errors="replace")
@@ -1125,7 +1130,11 @@ def _validate_proxy_contract(root: Path) -> list[str]:
         if '"--no-proxy-headers"' not in command:
             errors.append("backend Dockerfile default CMD must disable proxy headers")
 
-    nginx = frontend_path.read_text(encoding="utf-8", errors="replace")
+    nginx = nginx_path.read_text(encoding="utf-8", errors="replace")
+    # Strip nginx comments so that explanatory comments mentioning directive
+    # names (e.g. "# the literal form `proxy_pass http://api:8000;`") do not
+    # inflate string counts or break regex location-block matching.
+    nginx = re.sub(r"#[^\n]*", "", nginx)
     required_directives = {
         "proxy_set_header Host $host;",
         "proxy_set_header X-Real-IP $remote_addr;",
@@ -1144,14 +1153,43 @@ def _validate_proxy_contract(root: Path) -> list[str]:
     api_locations = re.findall(r"location\s+\^~\s+/api/\s*\{(.*?)\n\s*\}", nginx, re.DOTALL)
     if len(api_locations) != 1:
         errors.append("frontend Nginx must define exactly one prefix-locked /api/ location")
-    elif api_locations[0].count("proxy_pass http://api:8000;") != 1:
-        errors.append("frontend Nginx /api/ must proxy exactly to http://api:8000")
+    else:
+        api_block = api_locations[0]
+        # Two acceptable forms:
+        #   1. Literal:   proxy_pass http://api:8000;
+        #   2. Deferred:  set $api_upstream "api:8000"; proxy_pass http://$api_upstream;
+        # Form (2) is required for `nginx -t` to pass at image build time, because
+        # the "api" service hostname is only resolvable inside the Compose network
+        # at runtime. When form (2) is used, a `resolver` directive must also be
+        # present so nginx can resolve the variable at request time.
+        literal_pass = api_block.count("proxy_pass http://api:8000;")
+        variable_pass = (
+            'set $api_upstream "api:8000";' in api_block
+            and re.search(r"proxy_pass\s+http://\$api_upstream\s*;", api_block) is not None
+        )
+        if literal_pass + variable_pass != 1:
+            errors.append(
+                "frontend Nginx /api/ must proxy exactly to api:8000 (literal form "
+                "`proxy_pass http://api:8000;` or deferred form via $api_upstream "
+                "variable for build-time DNS resolution)"
+            )
+        if variable_pass and "resolver 127.0.0.11" not in nginx:
+            errors.append(
+                "frontend Nginx must declare `resolver 127.0.0.11` when using the "
+                "$api_upstream deferred-resolution form"
+            )
     if nginx.count("proxy_pass") != 1:
         errors.append("frontend Nginx must not define proxy_pass outside the /api/ contract")
     if re.search(r"location\s+(?:=\s*)?/api(?:\s|\{)", nginx):
         errors.append("frontend Nginx must not define an ambiguous bare /api location")
-    hidden_path_block = "location ~ /\\.(?!well-known/) {\n        deny all;\n    }"
-    if nginx.count(hidden_path_block) != 1:
+    # Match the hidden-path deny block with flexible whitespace/indentation,
+    # since the block is nested inside `server {` and its absolute indentation
+    # depth depends on the surrounding context.
+    hidden_path_pattern = re.compile(
+        r"location\s+~\s*/\\\.\(\?!well-known/\)\s*\{\s*deny\s+all;\s*\}",
+        re.DOTALL,
+    )
+    if not hidden_path_pattern.search(nginx):
         errors.append("frontend Nginx must deny hidden paths except /.well-known/")
     constrained_scheme_map = re.compile(
         r"map\s+\$http_x_forwarded_proto\s+\$forwarded_proto\s*\{\s*"
