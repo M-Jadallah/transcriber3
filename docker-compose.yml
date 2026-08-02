@@ -208,13 +208,18 @@ services:
       SESSION_IDLE_MINUTES: ${SESSION_IDLE_MINUTES:-120}
       COOKIE_SECURE: "true"
       TRUSTED_HOSTS: ${TRUSTED_HOSTS:?Set the public domain and health-check host}
-      # Gateway peer IP defaults to 10.99.42.2 to avoid collisions with
-      # Docker's default bridge range (172.17.0.0/16 .. 172.31.0.0/16).
-      # The 10.99.42.0/24 range is RFC 1918 private space, outside Docker's
-      # default allocation pool, which eliminates "Address already in use"
-      # errors observed when Coolify redeploys with the previous 172.29.0.0/24
-      # subnet that overlapped with other networks on the host.
-      FORWARDED_ALLOW_IPS: ${GATEWAY_PEER_IP:-10.99.42.2}
+      # Trust the gateway's forwarded headers unconditionally. This is safe
+      # because the `gateway` Compose network is marked `internal: true`, so
+      # the api service is only reachable from the gateway service on that
+      # network. Hardcoding a static peer IP does NOT work under Coolify:
+      # Coolify creates the network with its own UUID-prefixed name and lets
+      # Docker's IPAM auto-assign the subnet, which ignores the static
+      # subnet/IP configured below. The result was the deployment error:
+      #   "no configured subnet contains IP address 172.29.0.2"
+      # Using '*' sidesteps Coolify's IPAM override entirely and is the
+      # standard uvicorn pattern when sitting behind a trusted reverse proxy
+      # on an isolated internal network.
+      FORWARDED_ALLOW_IPS: "*"
       WORKER_NAME: api
       FORMATTING_ROOT: /data/formatting
       OPENCODE_INTERNAL_URL: http://opencode-runtime:4096
@@ -611,14 +616,18 @@ services:
     expose:
       - "80"
     networks:
-      edge:
-      gateway:
-        # Static IP avoids depending on Docker's IPAM ordering for
-        # FORWARDED_ALLOW_IPS trust in the API service. The default
-        # 10.99.42.2 lives in 10.99.42.0/24, intentionally outside Docker's
-        # default 172.x bridge allocation range to prevent the
-        # "Address already in use" error observed during Coolify redeployments.
-        ipv4_address: ${GATEWAY_PEER_IP:-10.99.42.2}
+      # Attach to `edge` (the public Coolify network) and `gateway` (the
+      # internal-only network shared with `api`). NO static ipv4_address is
+      # set: Coolify creates its own UUID-prefixed network and lets Docker's
+      # IPAM auto-assign the subnet, so any static IP we pin here would be
+      # rejected with:
+      #   "no configured subnet contains IP address <X>"
+      # The api service trusts forwarded headers from any source on the
+      # `gateway` network via FORWARDED_ALLOW_IPS="*"; this is safe because
+      # the network is `internal: true` and only `gateway` and `api` are
+      # attached to it.
+      - edge
+      - gateway
     depends_on:
       api:
         condition: service_healthy
@@ -665,16 +674,15 @@ networks:
   edge:
     internal: false
   gateway:
+    # Internal-only bridge between the public gateway (nginx) and the api
+    # service. NO IPAM subnet is configured: Coolify creates this network with
+    # a UUID-prefixed name (e.g. `<resource_uuid>_gateway`) and Docker's IPAM
+    # auto-assigns the subnet. Hardcoding a subnet here does NOT work — Coolify
+    # ignores it, and any service that also pins an ipv4_address will fail to
+    # start with "no configured subnet contains IP address <X>". We rely on
+    # `internal: true` plus `FORWARDED_ALLOW_IPS="*"` on the api side for
+    # trust isolation instead of a static peer IP.
     internal: true
-    ipam:
-      config:
-        # 10.99.42.0/24 is RFC 1918 private space outside Docker's default
-        # 172.16.0.0/12 bridge allocation range. This eliminates subnet overlap
-        # with unrelated Coolify-managed or user-defined networks that previously
-        # caused "Address already in use" during redeployment. Override with the
-        # GATEWAY_NETWORK_SUBNET env var if this range is already in use on the
-        # host; remember to also override GATEWAY_PEER_IP to a usable host.
-        - subnet: ${GATEWAY_NETWORK_SUBNET:-10.99.42.0/24}
   data:
     internal: true
   formatting-control:
