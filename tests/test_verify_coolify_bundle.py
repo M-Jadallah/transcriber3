@@ -305,11 +305,11 @@ class VerifyCoolifyBundleTests(unittest.TestCase):
         self.assertEqual(services["gateway"]["networks"]["edge"], None)
         self.assertEqual(
             services["gateway"]["networks"]["gateway"]["ipv4_address"],
-            "${GATEWAY_PEER_IP:-172.29.0.2}",
+            "${GATEWAY_PEER_IP:-10.99.42.2}",
         )
         self.assertEqual(
             services["api"]["environment"]["FORWARDED_ALLOW_IPS"],
-            "${GATEWAY_PEER_IP:-172.29.0.2}",
+            "${GATEWAY_PEER_IP:-10.99.42.2}",
         )
         self.assertIn(
             "--forwarded-allow-ips=$${FORWARDED_ALLOW_IPS}",
@@ -332,7 +332,7 @@ class VerifyCoolifyBundleTests(unittest.TestCase):
 
         broken_services = copy.deepcopy(services)
         broken_services["api"]["environment"]["FORWARDED_ALLOW_IPS"] = (
-            "${GATEWAY_PEER_IP:-172.29.0.3}"
+            "${GATEWAY_PEER_IP:-10.99.42.3}"
         )
         self.assertTrue(
             any(
@@ -343,7 +343,7 @@ class VerifyCoolifyBundleTests(unittest.TestCase):
 
         broken_networks = copy.deepcopy(networks)
         broken_networks["gateway"]["ipam"]["config"][0]["subnet"] = (
-            "${GATEWAY_NETWORK_SUBNET:-172.30.0.0/24}"
+            "${GATEWAY_NETWORK_SUBNET:-10.99.99.0/24}"
         )
         self.assertTrue(
             any(
