@@ -690,8 +690,8 @@ python scripts/verify_coolify_bundle.py .
 
 بعد نجاحه ارفع المشروع كاملًا، واختر `docker-compose.yml` في Coolify، وأدخل القيم
 اليدوية من `COOLIFY_ENVIRONMENT_VARIABLES_AR.md`، واربط الدومين بخدمة `gateway`
-على المنفذ 80. اختبر IPAM والعنوان `GATEWAY_PEER_IP` داخل
-`GATEWAY_NETWORK_SUBNET` في Staging قبل Deploy.
+على المنفذ 80. تحقق من عدم وجود متغيرات `GATEWAY_PEER_IP` أو
+`GATEWAY_NETWORK_SUBNET` أو `FORWARDED_ALLOW_IPS` قديمة في إعدادات Coolify.
 
 لا ترفع متغيرات `.env` غير الأمثلة المقصودة، أو Cookies، أو بيانات اعتماد
 Docker/SSH/Kubernetes/Cloud، أو مفاتيح وشهادات، أو قواعد بيانات وكاش وحالة محلية.
