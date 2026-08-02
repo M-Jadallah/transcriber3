@@ -44,7 +44,7 @@ class OpenCodeClient:
                 method,
                 f"{self.base_url}{path}",
                 auth=self.auth,
-                timeout=kwargs.pop("timeout", 20),
+                timeout=kwargs.pop("timeout", 5),
                 **kwargs,
             )
         except requests.RequestException as exc:
@@ -66,11 +66,11 @@ class OpenCodeClient:
         return data if isinstance(data, dict) else {"healthy": True}
 
     def providers(self) -> dict[str, Any]:
-        data = self._request("GET", "/provider")
+        data = self._request("GET", "/provider", timeout=5)
         return data if isinstance(data, dict) else {"all": [], "connected": []}
 
     def auth_methods(self) -> dict[str, list[dict[str, Any]]]:
-        data = self._request("GET", "/provider/auth")
+        data = self._request("GET", "/provider/auth", timeout=5)
         if not isinstance(data, dict):
             return {}
         return {
