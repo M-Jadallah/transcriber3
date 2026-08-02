@@ -1,0 +1,77 @@
+# syntax=docker/dockerfile:1.7
+
+ARG OPENCODE_VERSION=1.18.8
+
+FROM node:22-bookworm-slim AS opencode
+ARG OPENCODE_VERSION
+RUN npm install -g --omit=dev "opencode-ai@${OPENCODE_VERSION}" \
+    && opencode --version
+
+FROM python:3.12-slim-bookworm AS python-builder
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       build-essential \
+       gcc \
+       libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY backend/requirements.txt /tmp/requirements.txt
+COPY backend/requirements-formatting.txt /tmp/requirements-formatting.txt
+
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/python -m pip install --upgrade pip setuptools wheel \
+    && /opt/venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt \
+    && if [ -s /tmp/requirements-formatting.txt ]; then \
+         /opt/venv/bin/pip install --no-cache-dir -r /tmp/requirements-formatting.txt; \
+       fi \
+    && /opt/venv/bin/pip check
+
+FROM python:3.12-slim-bookworm AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HOME=/home/formatter \
+    XDG_DATA_HOME=/data/opencode/data \
+    XDG_CONFIG_HOME=/data/opencode/config \
+    XDG_CACHE_HOME=/data/opencode/cache \
+    PATH=/opt/venv/bin:/usr/local/bin:$PATH
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       ca-certificates \
+       curl \
+       git \
+       libpq5 \
+       tini \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=opencode /usr/local/bin/node /usr/local/bin/node
+COPY --from=opencode /usr/local/bin/opencode /usr/local/bin/opencode
+COPY --from=opencode /usr/local/lib/node_modules /usr/local/lib/node_modules
+COPY --from=python-builder /opt/venv /opt/venv
+
+WORKDIR /app
+COPY --chown=10001:10001 backend/app/ ./app/
+COPY --chown=10001:10001 backend/alembic/ ./alembic/
+COPY --chown=10001:10001 backend/alembic.ini ./alembic.ini
+
+RUN groupadd --gid 10001 formatter \
+    && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/formatter formatter \
+    && mkdir -p \
+       /data/formatting/skills \
+       /data/formatting/jobs \
+       /data/opencode/data \
+       /data/opencode/config \
+       /data/opencode/cache \
+    && chown -R formatter:formatter /app /data /home/formatter
+
+USER 10001:10001
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["celery", "-A", "app.formatting.celery_bootstrap:celery_app", "worker", "-Q", "formatting", "--concurrency=1", "--loglevel=INFO"]

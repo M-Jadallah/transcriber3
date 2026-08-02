@@ -1,0 +1,43 @@
+# Core API
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+pydantic>=2.8,<3
+pydantic-settings>=2.4,<3
+python-multipart>=0.0.20,<1
+
+# Database and migrations
+SQLAlchemy>=2.0,<3
+psycopg[binary]>=3.2,<4
+alembic>=1.13,<2
+
+# Queue and cache
+celery[redis]>=5.4,<6
+redis>=5,<7
+
+# HTTP, retries and serialization
+httpx>=0.27,<1
+requests>=2.32,<3
+tenacity>=8.5,<10
+orjson>=3.10,<4
+PyYAML>=6.0,<7
+python-dateutil>=2.9,<3
+
+# Authentication and security helpers
+passlib[bcrypt]>=1.7,<2
+bcrypt>=4.2,<5
+itsdangerous>=2.2,<3
+python-jose[cryptography]>=3.3,<4
+cryptography>=43,<47
+
+# Files and exports
+aiofiles>=24,<25
+python-docx>=1.1,<2
+openpyxl>=3.1,<4
+
+# YouTube and transcription pipeline
+yt-dlp>=2025.1.1
+deepgram-sdk>=3.7,<5
+
+# Runtime and scheduling utilities
+APScheduler>=3.10,<4
+psutil>=6,<8

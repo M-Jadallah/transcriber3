@@ -1,0 +1,662 @@
+# Canonical Docker Compose and Coolify stack. Deploy this file directly.
+# Coolify generates SERVICE_* values automatically and keeps them stable.
+# exclude_from_hc is Coolify's documented one-shot service extension.
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-data-environment: &data-environment
+  APP_ENV: ${APP_ENV:-production}
+  TZ: ${TZ:-Asia/Amman}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  DATABASE_URL: "postgresql://${POSTGRES_USER:-youtube_transcriber}:${SERVICE_PASSWORD_64_POSTGRES}@postgres:5432/${POSTGRES_DB:-youtube_transcriber}"
+  REDIS_URL: "redis://:${SERVICE_PASSWORD_64_REDIS}@redis:6379/0"
+
+x-transcription-environment: &transcription-environment
+  <<: *data-environment
+  AUDIO_ROOT: /data/audio
+  EXPORTS_ROOT: /data/exports
+  YOUTUBE_CONFIG_ROOT: /data/youtube
+  AUDIO_RETENTION_HOURS: ${AUDIO_RETENTION_HOURS:-24}
+  AUDIO_BITRATE: ${AUDIO_BITRATE:-64k}
+  AUDIO_SAMPLE_RATE: ${AUDIO_SAMPLE_RATE:-16000}
+  AUDIO_CHANNELS: ${AUDIO_CHANNELS:-1}
+  DEFAULT_LANGUAGE: ${DEFAULT_LANGUAGE:-ar}
+  DEFAULT_DEEPGRAM_MODEL: ${DEFAULT_DEEPGRAM_MODEL:-whisper-large}
+
+x-backend-common: &backend-common
+  build:
+    context: .
+    dockerfile: backend/Dockerfile
+  restart: unless-stopped
+  networks:
+    - data
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  tmpfs:
+    - /tmp:size=512m,mode=1777
+  pids_limit: 256
+  mem_limit: 1g
+  cpus: 1.0
+  stop_signal: SIGTERM
+  stop_grace_period: 2m
+  logging: *default-logging
+
+x-transcription-volumes: &transcription-volumes
+  - audio-data:/data/audio
+  - exports-data:/data/exports
+  - youtube-config:/data/youtube
+
+x-worker-healthcheck: &worker-healthcheck
+  test:
+    - CMD-SHELL
+    - >-
+      celery -A app.celery_app inspect ping
+      -d "$${WORKER_NAME}@$$(hostname)" --timeout=5 | grep -q pong
+  interval: 30s
+  timeout: 10s
+  retries: 5
+  start_period: 45s
+
+services:
+  storage-init:
+    image: alpine:3.22
+    user: "0:0"
+    restart: "no"
+    exclude_from_hc: true
+    network_mode: none
+    command:
+      - sh
+      - -c
+      - >-
+        mkdir -p /data/audio /data/exports /data/youtube &&
+        chown 10001:10001 /data/audio /data/exports /data/youtube
+    volumes: *transcription-volumes
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 32
+    mem_limit: 128m
+    cpus: 0.25
+    logging: *default-logging
+
+  formatting-storage-init:
+    image: alpine:3.22
+    user: "0:0"
+    restart: "no"
+    exclude_from_hc: true
+    network_mode: none
+    command:
+      - sh
+      - -c
+      - >-
+        mkdir -p /data/formatting/skills /data/formatting/jobs
+        /data/formatting-execution /data/opencode/data &&
+        rm -f /data/formatting-execution/.formatting-execution-root &&
+        printf 'transcriptr-formatting-execution-v1\n' >
+        /data/formatting-execution/.formatting-execution-root &&
+        test -f /data/formatting-execution/.formatting-execution-root &&
+        test ! -L /data/formatting-execution/.formatting-execution-root &&
+        chown 10001:10001 /data/formatting /data/formatting/skills
+        /data/formatting/jobs /data/formatting-execution /data/opencode/data
+        /data/formatting-execution/.formatting-execution-root &&
+        chmod 0644 /data/formatting-execution/.formatting-execution-root
+    volumes:
+      - formatting-data:/data/formatting
+      - formatting-jobs-data:/data/formatting/jobs
+      - formatting-execution-exchange:/data/formatting-execution
+      - opencode-data:/data/opencode/data
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 32
+    mem_limit: 128m
+    cpus: 0.25
+    logging: *default-logging
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-youtube_transcriber}
+      POSTGRES_USER: ${POSTGRES_USER:-youtube_transcriber}
+      POSTGRES_PASSWORD: ${SERVICE_PASSWORD_64_POSTGRES}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: 1.5
+    stop_grace_period: 1m
+    logging: *default-logging
+
+  redis:
+    image: redis:8-alpine
+    user: redis
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${SERVICE_PASSWORD_64_REDIS}
+    command:
+      - sh
+      - -ec
+      - |
+        umask 077
+        printf 'appendonly yes\nappendfsync everysec\nrequirepass %s\n' "$$REDIS_PASSWORD" > /tmp/redis.conf
+        exec redis-server /tmp/redis.conf
+    volumes:
+      - redis-data:/data
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=1m,mode=1777
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    stop_grace_period: 30s
+    logging: *default-logging
+
+  migrate:
+    <<: *backend-common
+    restart: "no"
+    exclude_from_hc: true
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      TZ: ${TZ:-Asia/Amman}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-youtube_transcriber}:${SERVICE_PASSWORD_64_POSTGRES}@postgres:5432/${POSTGRES_DB:-youtube_transcriber}"
+    command: ["sh", "-c", "python -m app.db_wait && exec alembic upgrade head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *backend-common
+    environment:
+      <<: *transcription-environment
+      APP_URL: ${APP_URL:?Set APP_URL in Coolify}
+      APP_VERSION: ${APP_VERSION:-1.0.0}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${SERVICE_PASSWORD_64_ADMIN}
+      SESSION_SECRET: ${SERVICE_HEX_128_SESSION}
+      SESSION_TTL_MINUTES: ${SESSION_TTL_MINUTES:-720}
+      SESSION_IDLE_MINUTES: ${SESSION_IDLE_MINUTES:-120}
+      COOKIE_SECURE: "true"
+      TRUSTED_HOSTS: ${TRUSTED_HOSTS:?Set the public domain and health-check host}
+      FORWARDED_ALLOW_IPS: ${GATEWAY_PEER_IP:-172.29.0.2}
+      WORKER_NAME: api
+      FORMATTING_ROOT: /data/formatting
+      OPENCODE_INTERNAL_URL: http://opencode-runtime:4096
+      OPENCODE_CONTROL_URL: http://opencode-runtime:4097
+      OPENCODE_SERVER_USERNAME: ${OPENCODE_SERVER_USERNAME:-opencode}
+      OPENCODE_SERVER_PASSWORD: ${SERVICE_PASSWORD_64_OPENCODE}
+      FORMATTING_DEFAULT_MODEL: ${FORMATTING_DEFAULT_MODEL:-openai/gpt-5.6-sol}
+      FORMATTING_DEFAULT_REASONING: ${FORMATTING_DEFAULT_REASONING:-high}
+      FORMATTING_TIMEOUT_SECONDS: ${FORMATTING_TIMEOUT_SECONDS:-7200}
+      FORMATTING_INPUT_MAX_BYTES: ${FORMATTING_INPUT_MAX_BYTES:-20971520}
+      FORMATTING_STORAGE_MAX_BYTES: ${FORMATTING_STORAGE_MAX_BYTES:-21474836480}
+      FORMATTING_SKILL_MAX_ARCHIVE_BYTES: ${FORMATTING_SKILL_MAX_ARCHIVE_BYTES:-52428800}
+      FORMATTING_SKILL_MAX_FILES: ${FORMATTING_SKILL_MAX_FILES:-2000}
+      FORMATTING_SKILL_MAX_UNPACKED_BYTES: ${FORMATTING_SKILL_MAX_UNPACKED_BYTES:-268435456}
+      FORMATTING_OUTPUT_MAX_FILES: ${FORMATTING_OUTPUT_MAX_FILES:-100}
+      FORMATTING_OUTPUT_MAX_TOTAL_BYTES: ${FORMATTING_OUTPUT_MAX_TOTAL_BYTES:-209715200}
+      FORMATTING_OUTPUT_MAX_SINGLE_FILE_BYTES: ${FORMATTING_OUTPUT_MAX_SINGLE_FILE_BYTES:-104857600}
+      FORMATTING_EXECUTION_LOG_MAX_BYTES: ${FORMATTING_EXECUTION_LOG_MAX_BYTES:-20971520}
+      FORMATTING_EXECUTION_WORKSPACE_MAX_ENTRIES: ${FORMATTING_EXECUTION_WORKSPACE_MAX_ENTRIES:-5000}
+      FORMATTING_EXECUTION_WORKSPACE_MAX_BYTES: ${FORMATTING_EXECUTION_WORKSPACE_MAX_BYTES:-805306368}
+    volumes:
+      - audio-data:/data/audio
+      - exports-data:/data/exports
+      - youtube-config:/data/youtube
+      - formatting-data:/data/formatting
+      - formatting-jobs-data:/data/formatting/jobs
+    networks:
+      - gateway
+      - data
+      - formatting-control
+    command: ["sh", "-c", "python -m app.db_wait && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=$${FORWARDED_ALLOW_IPS}"]
+    depends_on:
+      storage-init:
+        condition: service_completed_successfully
+      formatting-storage-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          host="$${TRUSTED_HOSTS%%,*}";
+          curl -fsS -H "Host: $$host" http://127.0.0.1:8000/api/health
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 30s
+
+  worker-1:
+    <<: *backend-common
+    environment:
+      <<: *transcription-environment
+      WORKER_NAME: worker-1
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY_WORKER_1:?Set worker 1 Deepgram key}
+    volumes: *transcription-volumes
+    networks: [data, transcription-egress]
+    command: ["sh", "-c", "python -m app.db_wait && exec celery -A app.celery_app worker --loglevel=INFO --concurrency=1 --hostname=worker-1@%h --max-tasks-per-child=20"]
+    depends_on:
+      storage-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck: *worker-healthcheck
+    stop_grace_period: 5m
+
+  worker-2:
+    <<: *backend-common
+    environment:
+      <<: *transcription-environment
+      WORKER_NAME: worker-2
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY_WORKER_2:?Set worker 2 Deepgram key}
+    volumes: *transcription-volumes
+    networks: [data, transcription-egress]
+    command: ["sh", "-c", "python -m app.db_wait && exec celery -A app.celery_app worker --loglevel=INFO --concurrency=1 --hostname=worker-2@%h --max-tasks-per-child=20"]
+    depends_on:
+      storage-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck: *worker-healthcheck
+    stop_grace_period: 5m
+
+  worker-3:
+    <<: *backend-common
+    environment:
+      <<: *transcription-environment
+      WORKER_NAME: worker-3
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY_WORKER_3:?Set worker 3 Deepgram key}
+    volumes: *transcription-volumes
+    networks: [data, transcription-egress]
+    command: ["sh", "-c", "python -m app.db_wait && exec celery -A app.celery_app worker --loglevel=INFO --concurrency=1 --hostname=worker-3@%h --max-tasks-per-child=20"]
+    depends_on:
+      storage-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck: *worker-healthcheck
+    stop_grace_period: 5m
+
+  worker-4:
+    <<: *backend-common
+    environment:
+      <<: *transcription-environment
+      WORKER_NAME: worker-4
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY_WORKER_4:?Set worker 4 Deepgram key}
+    volumes: *transcription-volumes
+    networks: [data, transcription-egress]
+    command: ["sh", "-c", "python -m app.db_wait && exec celery -A app.celery_app worker --loglevel=INFO --concurrency=1 --hostname=worker-4@%h --max-tasks-per-child=20"]
+    depends_on:
+      storage-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck: *worker-healthcheck
+    stop_grace_period: 5m
+
+  worker-5:
+    <<: *backend-common
+    environment:
+      <<: *transcription-environment
+      WORKER_NAME: worker-5
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY_WORKER_5:?Set worker 5 Deepgram key}
+    volumes: *transcription-volumes
+    networks: [data, transcription-egress]
+    command: ["sh", "-c", "python -m app.db_wait && exec celery -A app.celery_app worker --loglevel=INFO --concurrency=1 --hostname=worker-5@%h --max-tasks-per-child=20"]
+    depends_on:
+      storage-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck: *worker-healthcheck
+    stop_grace_period: 5m
+
+  scheduler:
+    <<: *backend-common
+    environment:
+      <<: *data-environment
+      AUDIO_ROOT: /data/audio
+      EXPORTS_ROOT: /data/exports
+      YOUTUBE_CONFIG_ROOT: /data/youtube
+      AUDIO_RETENTION_HOURS: ${AUDIO_RETENTION_HOURS:-24}
+      WORKER_NAME: scheduler
+    volumes: *transcription-volumes
+    command: ["sh", "-c", "python -m app.db_wait && exec python -m app.scheduler"]
+    depends_on:
+      storage-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "from pathlib import Path; children=Path('/proc/1/task/1/children').read_text().split(); raise SystemExit(len(children) != 1 or not Path(f'/proc/{children[0]}').is_dir() or b'app.scheduler' not in Path(f'/proc/{children[0]}/cmdline').read_bytes())"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  opencode-runtime:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.formatting
+      args:
+        OPENCODE_VERSION: ${OPENCODE_VERSION:-1.18.8}
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - >-
+        python -m app.formatting.opencode_control & control_pid=$$!;
+        opencode serve --hostname 0.0.0.0 --port 4096 & server_pid=$$!;
+        trap 'kill -TERM "$$control_pid" "$$server_pid" 2>/dev/null || true' TERM INT EXIT;
+        while kill -0 "$$control_pid" 2>/dev/null && kill -0 "$$server_pid" 2>/dev/null; do sleep 2; done;
+        status=0;
+        kill -TERM "$$control_pid" "$$server_pid" 2>/dev/null || true;
+        wait "$$control_pid" || status=$$?;
+        wait "$$server_pid" || status=$$?;
+        exit "$$status"
+    environment:
+      HOME: /home/formatter
+      XDG_DATA_HOME: /data/opencode/data
+      XDG_CONFIG_HOME: /tmp/opencode-config
+      XDG_CACHE_HOME: /tmp/opencode-cache
+      OPENCODE_SERVER_USERNAME: ${OPENCODE_SERVER_USERNAME:-opencode}
+      OPENCODE_SERVER_PASSWORD: ${SERVICE_PASSWORD_64_OPENCODE}
+      OPENCODE_DISABLE_AUTOUPDATE: "true"
+      OPENCODE_CONTROL_PORT: "4097"
+      OPENCODE_CONTROL_LOG_LEVEL: warning
+    volumes:
+      - opencode-data:/data/opencode/data
+      - formatting-execution-exchange:/data/formatting-execution
+    networks:
+      - formatting-control
+      - formatting-egress
+    depends_on:
+      formatting-storage-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS --user "$${OPENCODE_SERVER_USERNAME}:$${OPENCODE_SERVER_PASSWORD}"
+          http://127.0.0.1:4096/global/health >/dev/null &&
+          curl -fsS --user "$${OPENCODE_SERVER_USERNAME}:$${OPENCODE_SERVER_PASSWORD}"
+          http://127.0.0.1:4097/health >/dev/null
+      interval: 20s
+      timeout: 8s
+      retries: 10
+      start_period: 40s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    pids_limit: 512
+    mem_limit: 4g
+    cpus: 2.0
+    stop_signal: SIGTERM
+    stop_grace_period: 2m
+    logging: *default-logging
+
+  formatting-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.formatting
+      args:
+        OPENCODE_VERSION: ${OPENCODE_VERSION:-1.18.8}
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - >-
+        python -m app.db_wait &&
+        exec celery -A app.formatting.celery_bootstrap:celery_app worker
+        -Q formatting --loglevel=INFO --concurrency=1
+        --hostname=formatting-worker@%h --max-tasks-per-child=10
+    environment:
+      <<: *data-environment
+      WORKER_NAME: formatting-worker
+      FORMATTING_ROOT: /data/formatting
+      FORMATTING_EXECUTION_ROOT: /data/formatting-execution
+      FORMATTING_TIMEOUT_SECONDS: ${FORMATTING_TIMEOUT_SECONDS:-7200}
+      FORMATTING_LEASE_SECONDS: ${FORMATTING_LEASE_SECONDS:-900}
+      FORMATTING_HEARTBEAT_SECONDS: ${FORMATTING_HEARTBEAT_SECONDS:-30}
+      FORMATTING_INPUT_MAX_BYTES: ${FORMATTING_INPUT_MAX_BYTES:-20971520}
+      FORMATTING_STORAGE_MAX_BYTES: ${FORMATTING_STORAGE_MAX_BYTES:-21474836480}
+      FORMATTING_SKILL_MAX_ARCHIVE_BYTES: ${FORMATTING_SKILL_MAX_ARCHIVE_BYTES:-52428800}
+      FORMATTING_SKILL_MAX_FILES: ${FORMATTING_SKILL_MAX_FILES:-2000}
+      FORMATTING_SKILL_MAX_UNPACKED_BYTES: ${FORMATTING_SKILL_MAX_UNPACKED_BYTES:-268435456}
+      FORMATTING_OUTPUT_MAX_FILES: ${FORMATTING_OUTPUT_MAX_FILES:-100}
+      FORMATTING_OUTPUT_MAX_TOTAL_BYTES: ${FORMATTING_OUTPUT_MAX_TOTAL_BYTES:-209715200}
+      FORMATTING_OUTPUT_MAX_SINGLE_FILE_BYTES: ${FORMATTING_OUTPUT_MAX_SINGLE_FILE_BYTES:-104857600}
+      FORMATTING_EXECUTION_LOG_MAX_BYTES: ${FORMATTING_EXECUTION_LOG_MAX_BYTES:-20971520}
+      FORMATTING_EXECUTION_WORKSPACE_MAX_ENTRIES: ${FORMATTING_EXECUTION_WORKSPACE_MAX_ENTRIES:-5000}
+      FORMATTING_EXECUTION_WORKSPACE_MAX_BYTES: ${FORMATTING_EXECUTION_WORKSPACE_MAX_BYTES:-805306368}
+      XDG_DATA_HOME: /tmp/opencode-data
+      XDG_CONFIG_HOME: /tmp/opencode-config
+      XDG_CACHE_HOME: /tmp/opencode-cache
+      OPENCODE_INTERNAL_URL: http://opencode-runtime:4096
+      OPENCODE_SERVER_USERNAME: ${OPENCODE_SERVER_USERNAME:-opencode}
+      OPENCODE_SERVER_PASSWORD: ${SERVICE_PASSWORD_64_OPENCODE}
+    volumes:
+      - formatting-data:/data/formatting
+      - formatting-jobs-data:/data/formatting/jobs
+      - formatting-execution-exchange:/data/formatting-execution
+    networks:
+      - data
+      - formatting-control
+    depends_on:
+      formatting-storage-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      opencode-runtime:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          celery -A app.formatting.celery_bootstrap:celery_app inspect ping
+          -d "formatting-worker@$$(hostname)" --timeout=5 | grep -q pong
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    pids_limit: 512
+    mem_limit: 4g
+    cpus: 2.0
+    stop_signal: SIGTERM
+    stop_grace_period: 15m
+    logging: *default-logging
+
+  formatting-dispatcher:
+    <<: *backend-common
+    environment:
+      <<: *data-environment
+      WORKER_NAME: formatting-dispatcher
+      FORMATTING_EXECUTION_ROOT: /data/formatting-execution
+      FORMATTING_OUTBOX_POLL_SECONDS: ${FORMATTING_OUTBOX_POLL_SECONDS:-1}
+      FORMATTING_OUTBOX_STALE_SECONDS: ${FORMATTING_OUTBOX_STALE_SECONDS:-120}
+      FORMATTING_OUTBOX_BACKOFF_BASE_SECONDS: ${FORMATTING_OUTBOX_BACKOFF_BASE_SECONDS:-2}
+      FORMATTING_OUTBOX_BACKOFF_CAP_SECONDS: ${FORMATTING_OUTBOX_BACKOFF_CAP_SECONDS:-300}
+      FORMATTING_RECOVERY_BATCH_SIZE: ${FORMATTING_RECOVERY_BATCH_SIZE:-25}
+      FORMATTING_QUEUED_RECONCILE_AGE_SECONDS: ${FORMATTING_QUEUED_RECONCILE_AGE_SECONDS:-300}
+      FORMATTING_RECONCILE_BATCH_SIZE: ${FORMATTING_RECONCILE_BATCH_SIZE:-25}
+      FORMATTING_OUTBOX_MAX_DISPATCH_PER_CYCLE: ${FORMATTING_OUTBOX_MAX_DISPATCH_PER_CYCLE:-100}
+      FORMATTING_EXCHANGE_JANITOR_INTERVAL_SECONDS: ${FORMATTING_EXCHANGE_JANITOR_INTERVAL_SECONDS:-300}
+      FORMATTING_EXCHANGE_JANITOR_GRACE_SECONDS: ${FORMATTING_EXCHANGE_JANITOR_GRACE_SECONDS:-86400}
+      FORMATTING_EXCHANGE_JANITOR_RECENT_LEASE_SECONDS: ${FORMATTING_EXCHANGE_JANITOR_RECENT_LEASE_SECONDS:-300}
+      FORMATTING_EXCHANGE_JANITOR_MAX_ENTRIES: ${FORMATTING_EXCHANGE_JANITOR_MAX_ENTRIES:-10000}
+      FORMATTING_DISPATCHER_HEARTBEAT_PATH: ${FORMATTING_DISPATCHER_HEARTBEAT_PATH:-/tmp/formatting-dispatcher-heartbeat}
+      FORMATTING_DISPATCHER_HEARTBEAT_MAX_AGE_SECONDS: ${FORMATTING_DISPATCHER_HEARTBEAT_MAX_AGE_SECONDS:-180}
+    networks: [data]
+    volumes:
+      - formatting-execution-exchange:/data/formatting-execution
+    command:
+      - sh
+      - -c
+      - >-
+        python -m app.db_wait &&
+        exec python -m app.formatting.outbox_dispatcher
+    depends_on:
+      formatting-storage-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,time; from pathlib import Path; age=time.time()-float(Path(os.environ['FORMATTING_DISPATCHER_HEARTBEAT_PATH']).read_text(encoding='ascii')); raise SystemExit(not 0 <= age <= float(os.environ['FORMATTING_DISPATCHER_HEARTBEAT_MAX_AGE_SECONDS']))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.5
+    stop_grace_period: 1m
+    logging: *default-logging
+
+  gateway:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    restart: unless-stopped
+    expose:
+      - "80"
+    networks:
+      edge:
+      gateway:
+        ipv4_address: ${GATEWAY_PEER_IP:-172.29.0.2}
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - NET_BIND_SERVICE
+      - SETGID
+      - SETUID
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:size=64m,mode=0755
+      - /var/run:size=1m,mode=0755
+      - /tmp:size=16m,mode=1777
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.5
+    stop_signal: SIGQUIT
+    stop_grace_period: 30s
+    logging: *default-logging
+
+volumes:
+  postgres-data:
+  redis-data:
+  audio-data:
+  exports-data:
+  youtube-config:
+  formatting-data:
+  formatting-jobs-data:
+  formatting-execution-exchange:
+  opencode-data:
+
+networks:
+  edge:
+    internal: false
+  gateway:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${GATEWAY_NETWORK_SUBNET:-172.29.0.0/24}
+  data:
+    internal: true
+  formatting-control:
+    internal: true
+  formatting-egress:
+    internal: false
+  transcription-egress:
+    internal: false
