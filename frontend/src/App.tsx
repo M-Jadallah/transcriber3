@@ -96,25 +96,13 @@ function LoginPage() {
 
 function Layout() {
   // Three auth states: 'loading' (check in flight), 'authenticated', 'unauthenticated'.
-  // Previously, user started as null and the Layout immediately rendered
-  // <NavigateToLogin /> before the /api/auth/me check could complete. This
-  // caused a race condition where, after a successful login, the user was
-  // bounced back to /login because the auth check hadn't resolved yet.
+  // Plus an 'error' state for when the auth check fails due to network/timeout.
   const [user, setUser] = useState<string | null>(null);
-  const [authState, setAuthState] = useState<'loading' | 'authenticated' | 'unauthenticated'>('loading');
+  const [authState, setAuthState] = useState<'loading' | 'authenticated' | 'unauthenticated' | 'error'>('loading');
   const navigate = useNavigate();
 
   useEffect(() => {
     let cancelled = false;
-    // If we have a session token in localStorage, optimistically assume
-    // we're authenticated while the /auth/me check runs. This eliminates
-    // the loading flash after login.
-    const hasStoredToken = !!getSessionToken();
-    if (!hasStoredToken) {
-      // No stored token — skip the optimistic state, just check the cookie
-      setAuthState('loading');
-    }
-
     get<{ username: string }>('/auth/me')
       .then((data) => {
         if (!cancelled) {
@@ -122,9 +110,16 @@ function Layout() {
           setAuthState('authenticated');
         }
       })
-      .catch(() => {
-        if (!cancelled) {
-          // Clear any stale tokens
+      .catch((err) => {
+        if (cancelled) return;
+        // If the error is a timeout or network error (status 0), show an error
+        // state instead of redirecting to login. This prevents the user from
+        // being bounced to /login when the backend is just slow to respond.
+        if (err instanceof Error && err.message.includes('مهلة')) {
+          setAuthState('error');
+        } else if (err instanceof Error && err.message.includes('تعذر الاتصال')) {
+          setAuthState('error');
+        } else {
           clearSessionTokens();
           setAuthState('unauthenticated');
         }
@@ -133,6 +128,22 @@ function Layout() {
       cancelled = true;
     };
   }, []);
+
+  async function retryAuth() {
+    setAuthState('loading');
+    try {
+      const data = await get<{ username: string }>('/auth/me');
+      setUser(data.username);
+      setAuthState('authenticated');
+    } catch (err) {
+      if (err instanceof Error && (err.message.includes('مهلة') || err.message.includes('تعذر الاتصال'))) {
+        setAuthState('error');
+      } else {
+        clearSessionTokens();
+        setAuthState('unauthenticated');
+      }
+    }
+  }
 
   async function logout() {
     try {
@@ -146,13 +157,23 @@ function Layout() {
     navigate('/login', { replace: true });
   }
 
-  // While the auth check is in flight, show a loading indicator instead of
-  // redirecting. This prevents the race condition that bounced users back to
-  // /login immediately after a successful login.
   if (authState === 'loading') {
     return (
       <div className="center-container" role="status" aria-live="polite">
         <p>جارٍ التحقق...</p>
+      </div>
+    );
+  }
+
+  if (authState === 'error') {
+    return (
+      <div className="center-container">
+        <div className="alert error" role="alert">
+          تعذر الاتصال بالخادم. تأكد من أن الخدمة تعمل ثم أعد المحاولة.
+        </div>
+        <button className="primary" type="button" onClick={retryAuth}>
+          إعادة المحاولة
+        </button>
       </div>
     );
   }
