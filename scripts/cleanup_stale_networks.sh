@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # cleanup_stale_networks.sh
 #
-# Recovers from the "Error response from daemon: failed to set up container
-# networking: Address already in use" failure that occurs during Coolify
-# redeployments of the transcriber3 stack.
+# Recovers from stale Docker network/IPAM allocations left behind by previous
+# transcriber3 deployments on Coolify.
 #
-# Root cause: when a previous deployment's gateway container is stopped and
-# removed, Docker's IPAM may still hold the static IP address (10.99.42.2 in
-# the new default subnet, previously 172.29.0.2 in the old one) allocated
-# against the project's "gateway" Compose network. The next `docker compose up`
-# then fails to assign the same IP to the new gateway container.
+# Background: the current `docker-compose.yml` does NOT pin a static IP on
+# the gateway service and does NOT configure IPAM subnets — Coolify creates
+# the network and Docker IPAM auto-assigns the subnet. This script is mainly
+# needed to clean up leftover containers and networks from previous deployments
+# that may have used static IPs (`172.29.0.2` or `10.99.42.2`) and stuck
+# IPAM allocations.
 #
 # This script:
 #   1. Stops and removes any leftover containers from the current Coolify
@@ -18,8 +18,8 @@
 #      formatting-control, formatting-egress, transcription-egress) so Docker
 #      fully releases their IPAM allocations.
 #   3. Reports any other host-wide Docker networks whose subnet overlaps the
-#      configured GATEWAY_NETWORK_SUBNET, so the operator can decide whether
-#      to remove them or change the subnet.
+#      SUBNET argument (defaults to 10.99.42.0/24, the previous default), so
+#      the operator can decide whether to remove them.
 #
 # Usage:
 #   sudo bash scripts/cleanup_stale_networks.sh [PROJECT_NAME] [SUBNET]
@@ -184,13 +184,18 @@ done)
 if [[ "${OVERLAP_FOUND}" -eq 0 ]]; then
   log "No host Docker network overlaps '${GATEWAY_SUBNET}'. Clean to redeploy."
 else
-  warn "Overlap detected. Remove the conflicting networks above, or set a different"
-  warn "GATEWAY_NETWORK_SUBNET (and matching GATEWAY_PEER_IP) in Coolify's environment"
-  warn "variables before redeploying."
+  warn "Overlap detected with previously-used subnet '${GATEWAY_SUBNET}'."
+  warn "Remove the conflicting networks above before redeploying."
+  warn "Note: the current docker-compose.yml no longer uses a static gateway IP"
+  warn "or IPAM subnet, so the SUBNET argument only filters overlap detection"
+  warn "for leftover networks from previous deployments."
 fi
 
 log "Done. You can now trigger a new deployment in Coolify."
-log "If the deployment still fails with 'Address already in use', inspect:"
+log "If the deployment still fails with 'no configured subnet contains IP"
+log "address <X>', verify that no GATEWAY_PEER_IP, GATEWAY_NETWORK_SUBNET,"
+log "or FORWARDED_ALLOW_IPS environment variables are set in Coolify."
+log "Inspect:"
 log "  docker network ls"
 log "  docker network inspect <network-name>"
 log "and remove any lingering network whose Subnet overlaps '${GATEWAY_SUBNET}'."

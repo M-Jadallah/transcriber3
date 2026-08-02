@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ipaddress
 import re
 import stat
 import sys
@@ -979,41 +978,60 @@ def _validate_gateway_network(
     services: dict[str, Any],
     networks: dict[str, Any],
 ) -> list[str]:
+    """Validate the gateway <-> api trust topology.
+
+    Design (after the Coolify IPAM fix):
+    -------------------------------------
+    The gateway service has NO static ``ipv4_address`` and the ``gateway``
+    network has NO IPAM subnet configured. Coolify creates the network with a
+    UUID-prefixed name (e.g. ``<resource_uuid>_gateway``) and Docker's IPAM
+    auto-assigns the subnet; any static IP pinned in the compose file is
+    rejected at runtime with:
+
+        ``no configured subnet contains IP address <X>``
+
+    Trust isolation is provided by:
+
+    1. ``gateway`` network is ``internal: true`` — no external traffic reaches
+       the ``api`` service through it.
+    2. Only ``gateway`` and ``api`` are attached to the ``gateway`` network.
+    3. ``api`` accepts forwarded headers from any peer on that network
+       (``FORWARDED_ALLOW_IPS="*"``) — this is the standard uvicorn pattern
+       when sitting behind a trusted reverse proxy on an isolated network.
+    """
     errors: list[str] = []
     gateway_network = networks.get("gateway")
     if not isinstance(gateway_network, dict):
         return ["gateway network configuration must be a mapping"]
 
-    ipam = gateway_network.get("ipam")
-    configurations = ipam.get("config") if isinstance(ipam, dict) else None
-    if (
-        not isinstance(configurations, list)
-        or len(configurations) != 1
-        or not isinstance(configurations[0], dict)
-        or set(configurations[0]) != {"subnet"}
-    ):
-        return ["gateway network must have exactly one configurable IPAM subnet"]
+    # The gateway network MUST be internal-only — this is the trust boundary.
+    if gateway_network.get("internal") is not True:
+        errors.append("gateway network must be internal:true (trust isolation boundary)")
 
-    subnet_value = configurations[0].get("subnet")
-    subnet_default = _interpolation_default(subnet_value, "GATEWAY_NETWORK_SUBNET")
-    if subnet_default is None:
-        errors.append("gateway IPAM subnet must use GATEWAY_NETWORK_SUBNET with a default")
+    # The gateway network MUST NOT declare a static IPAM subnet: Coolify
+    # creates its own UUID-prefixed network and ignores the configured subnet,
+    # which previously caused "no configured subnet contains IP address <X>".
+    if "ipam" in gateway_network:
+        errors.append(
+            "gateway network must not declare IPAM config (Coolify auto-assigns subnet)"
+        )
 
     gateway = services.get("gateway", {})
     memberships = gateway.get("networks", {}) if isinstance(gateway, dict) else {}
+
+    # The gateway service MUST NOT pin a static ipv4_address — Coolify's
+    # auto-assigned subnet will reject it.
     gateway_attachment = (
         memberships.get("gateway") if isinstance(memberships, dict) else None
     )
-    peer_value = (
-        gateway_attachment.get("ipv4_address")
-        if isinstance(gateway_attachment, dict)
-        else None
-    )
-    peer_default = _interpolation_default(peer_value, "GATEWAY_PEER_IP")
-    if peer_default is None:
-        errors.append("gateway must use a configurable static GATEWAY_PEER_IP")
+    if isinstance(gateway_attachment, dict) and "ipv4_address" in gateway_attachment:
+        errors.append(
+            "gateway service must not pin ipv4_address (Coolify ignores the IPAM subnet)"
+        )
     if isinstance(memberships, dict) and memberships.get("edge") is not None:
         errors.append("gateway edge attachment must not have static network configuration")
+
+    # No service other than gateway may have a static ipv4_address either.
     for service_name, service in services.items():
         if service_name == "gateway" or not isinstance(service, dict):
             continue
@@ -1022,14 +1040,20 @@ def _validate_gateway_network(
             isinstance(configuration, dict) and "ipv4_address" in configuration
             for configuration in attachments.values()
         ):
-            errors.append(f"only gateway may declare a static network address ({service_name})")
+            errors.append(f"no service may declare a static network address ({service_name})")
 
     api = services.get("api", {})
     api_environment = _environment(api)
+
+    # FORWARDED_ALLOW_IPS must be exactly "*" (trusted-proxy on isolated
+    # internal network). Any tighter value would require knowing the gateway's
+    # IP, which Coolify does not expose to compose.
     trusted_value = api_environment.get("FORWARDED_ALLOW_IPS")
-    trusted_default = _interpolation_default(trusted_value, "GATEWAY_PEER_IP")
-    if trusted_default is None:
-        errors.append("api FORWARDED_ALLOW_IPS must use GATEWAY_PEER_IP with a default")
+    if trusted_value != "*":
+        errors.append(
+            "api FORWARDED_ALLOW_IPS must be exactly '*' "
+            "(trusted reverse proxy on isolated internal network)"
+        )
     trusted_roles = {
         service_name
         for service_name, service in services.items()
@@ -1038,32 +1062,16 @@ def _validate_gateway_network(
     if trusted_roles != {"api"}:
         errors.append("FORWARDED_ALLOW_IPS must be configured only for api")
 
+    # The api command MUST still pass --forwarded-allow-ips via the env var,
+    # so the same "*" value flows into uvicorn at runtime.
     api_command = _command_text(api.get("command", "") if isinstance(api, dict) else "")
     expected_forwarded = "--forwarded-allow-ips=$${FORWARDED_ALLOW_IPS}"
     if (
         expected_forwarded not in api_command
         or api_command.count("--forwarded-allow-ips=") != 1
     ):
-        errors.append("api must trust only FORWARDED_ALLOW_IPS from the static gateway peer")
+        errors.append("api must pass --forwarded-allow-ips from FORWARDED_ALLOW_IPS env var")
 
-    if (
-        peer_default is not None
-        and trusted_default is not None
-        and peer_default != trusted_default
-    ):
-        errors.append(
-            "default GATEWAY_PEER_IP must exactly match api FORWARDED_ALLOW_IPS"
-        )
-
-    if subnet_default is not None and peer_default is not None:
-        try:
-            subnet = ipaddress.ip_network(subnet_default, strict=True)
-            peer = ipaddress.ip_address(peer_default)
-        except ValueError:
-            errors.append("gateway subnet and peer IP defaults must be valid canonical addresses")
-        else:
-            if peer.version != subnet.version or peer not in subnet.hosts():
-                errors.append("default GATEWAY_PEER_IP must be a usable host in GATEWAY_NETWORK_SUBNET")
     return errors
 
 

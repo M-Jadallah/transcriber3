@@ -297,58 +297,94 @@ class VerifyCoolifyBundleTests(unittest.TestCase):
             any("gateway must expose only" in error for error in _validate_topology(broken))
         )
 
-    def test_gateway_edge_ipam_and_forwarded_trust_are_exact(self) -> None:
+    def test_gateway_internal_network_and_forwarded_trust_are_exact(self) -> None:
         compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
         services = compose["services"]
         networks = compose["networks"]
         self.assertEqual(_validate_gateway_network(services, networks), [])
-        self.assertEqual(services["gateway"]["networks"]["edge"], None)
-        self.assertEqual(
-            services["gateway"]["networks"]["gateway"]["ipv4_address"],
-            "${GATEWAY_PEER_IP:-10.99.42.2}",
-        )
+
+        # gateway must attach to `edge` and `gateway` (list form — no static IP).
+        gw_memberships = services["gateway"]["networks"]
+        self.assertEqual(gw_memberships, ["edge", "gateway"])
+
+        # gateway network must be internal-only and have NO IPAM config.
+        self.assertEqual(networks["gateway"].get("internal"), True)
+        self.assertNotIn("ipam", networks["gateway"])
+
+        # api must trust forwarded headers from any peer on the isolated
+        # internal gateway network.
         self.assertEqual(
             services["api"]["environment"]["FORWARDED_ALLOW_IPS"],
-            "${GATEWAY_PEER_IP:-10.99.42.2}",
+            "*",
         )
         self.assertIn(
             "--forwarded-allow-ips=$${FORWARDED_ALLOW_IPS}",
             services["api"]["command"][-1],
         )
 
+        # Pinning a static ipv4_address on the gateway service must be rejected
+        # — Coolify does not honor the compose IPAM subnet, so any pinned IP
+        # fails with "no configured subnet contains IP address <X>".
         broken_services = copy.deepcopy(services)
-        broken_services["api"]["command"][-1] = broken_services["api"]["command"][
-            -1
-        ].replace(
-            "$${FORWARDED_ALLOW_IPS}",
-            "*",
-        )
+        broken_services["gateway"]["networks"] = {
+            "edge": None,
+            "gateway": {"ipv4_address": "10.99.42.2"},
+        }
         self.assertTrue(
             any(
-                "trust only" in error
+                "must not pin ipv4_address" in error
                 for error in _validate_gateway_network(broken_services, networks)
             )
         )
 
+        # Declaring a static IPAM subnet on the gateway network must be
+        # rejected — Coolify overrides it.
+        broken_networks = copy.deepcopy(networks)
+        broken_networks["gateway"]["ipam"] = {
+            "config": [{"subnet": "10.99.42.0/24"}]
+        }
+        self.assertTrue(
+            any(
+                "must not declare IPAM config" in error
+                for error in _validate_gateway_network(services, broken_networks)
+            )
+        )
+
+        # Marking the gateway network as non-internal breaks the trust
+        # boundary, so it must be rejected.
+        broken_networks = copy.deepcopy(networks)
+        broken_networks["gateway"]["internal"] = False
+        self.assertTrue(
+            any(
+                "must be internal:true" in error
+                for error in _validate_gateway_network(services, broken_networks)
+            )
+        )
+
+        # Any FORWARDED_ALLOW_IPS value other than "*" must be rejected,
+        # because we cannot know the gateway's IP under Coolify.
         broken_services = copy.deepcopy(services)
         broken_services["api"]["environment"]["FORWARDED_ALLOW_IPS"] = (
-            "${GATEWAY_PEER_IP:-10.99.42.3}"
+            "${GATEWAY_PEER_IP:-10.99.42.2}"
         )
         self.assertTrue(
             any(
-                "exactly match" in error
+                "must be exactly '*'" in error
                 for error in _validate_gateway_network(broken_services, networks)
             )
         )
 
-        broken_networks = copy.deepcopy(networks)
-        broken_networks["gateway"]["ipam"]["config"][0]["subnet"] = (
-            "${GATEWAY_NETWORK_SUBNET:-10.99.99.0/24}"
+        # Any service other than api that sets FORWARDED_ALLOW_IPS must be
+        # rejected.
+        broken_services = copy.deepcopy(services)
+        broken_services["worker-1"]["environment"] = dict(
+            broken_services["worker-1"].get("environment", {}) or {}
         )
+        broken_services["worker-1"]["environment"]["FORWARDED_ALLOW_IPS"] = "*"
         self.assertTrue(
             any(
-                "usable host" in error
-                for error in _validate_gateway_network(services, broken_networks)
+                "must be configured only for api" in error
+                for error in _validate_gateway_network(broken_services, networks)
             )
         )
 
