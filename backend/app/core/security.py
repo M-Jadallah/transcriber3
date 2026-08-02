@@ -64,9 +64,19 @@ def create_session(response: Response, username: str) -> str:
     ttl_minutes = int(os.getenv("SESSION_TTL_MINUTES", "720"))
     max_age = ttl_minutes * 60
     secure = os.getenv("COOKIE_SECURE", "false").lower() in ("true", "1", "yes")
-    trusted_hosts = os.getenv("TRUSTED_HOSTS", "")
-    domain = trusted_hosts.split(",")[0].strip() if trusted_hosts else None
 
+    # Do NOT set the Domain attribute on the cookie. When Domain is omitted,
+    # the browser uses "host-only" matching: the cookie is sent only to the
+    # exact host that set it. This is the most reliable approach for same-
+    # origin authentication and avoids subtle domain-matching bugs.
+    #
+    # Previously, Domain was derived from TRUSTED_HOSTS. If TRUSTED_HOSTS
+    # contained unexpected formatting (trailing spaces, a port number, mixed
+    # case, or a comma-separated list with a malformed first entry), the
+    # browser would silently reject the Set-Cookie header — causing the
+    # login to "succeed" (200 OK) but the session cookie to never be stored,
+    # so the immediate /api/auth/me check returned 401 and the user was
+    # bounced back to the login page.
     response.set_cookie(
         SESSION_COOKIE_NAME,
         token,
@@ -74,7 +84,7 @@ def create_session(response: Response, username: str) -> str:
         httponly=True,
         secure=secure,
         samesite="lax",
-        domain=domain,
+        path="/",
     )
     response.set_cookie(
         CSRF_COOKIE_NAME,
@@ -83,7 +93,7 @@ def create_session(response: Response, username: str) -> str:
         httponly=False,
         secure=secure,
         samesite="lax",
-        domain=domain,
+        path="/",
     )
     return token
 
@@ -135,8 +145,10 @@ def require_csrf(request: Request) -> str:
 
 def destroy_session(response: Response) -> None:
     """Clear session and CSRF cookies."""
-    trusted_hosts = os.getenv("TRUSTED_HOSTS", "")
-    domain = trusted_hosts.split(",")[0].strip() if trusted_hosts else None
+    # Match the attributes used in create_session (no Domain, path="/").
+    # If Domain were set here but not in create_session (or vice versa), the
+    # browser would not delete the cookie.
+    secure = os.getenv("COOKIE_SECURE", "false").lower() in ("true", "1", "yes")
 
-    response.delete_cookie(SESSION_COOKIE_NAME, domain=domain)
-    response.delete_cookie(CSRF_COOKIE_NAME, domain=domain)
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/", secure=secure)
+    response.delete_cookie(CSRF_COOKIE_NAME, path="/", secure=secure)
