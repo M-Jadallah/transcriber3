@@ -260,7 +260,7 @@ EXPECTED_SECRET_PLACEMENTS = {
         ("postgres", "POSTGRES_PASSWORD"): "${SERVICE_PASSWORD_64_POSTGRES}",
         **{
             (service, "DATABASE_URL"): (
-                "postgresql://${POSTGRES_USER:-youtube_transcriber}:"
+                "postgresql+psycopg://${POSTGRES_USER:-youtube_transcriber}:"
                 "${SERVICE_PASSWORD_64_POSTGRES}@postgres:5432/"
                 "${POSTGRES_DB:-youtube_transcriber}"
             )
