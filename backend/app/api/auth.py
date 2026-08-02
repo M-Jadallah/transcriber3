@@ -40,7 +40,10 @@ def login(payload: LoginRequest, request: Request, response: Response) -> dict:
         raise HTTPException(401, "اسم المستخدم أو كلمة المرور غير صحيحة")
 
     create_session(response, payload.username)
-    return {"message": "تم تسجيل الدخول بنجاح"}
+    # Return the username so the frontend can set its auth state immediately
+    # without relying solely on a follow-up /api/auth/me call (which has a
+    # race condition with the Layout's initial render).
+    return {"message": "تم تسجيل الدخول بنجاح", "username": payload.username}
 
 
 @router.post("/auth/logout")

@@ -37,7 +37,11 @@ function LoginPage() {
     try {
       setBusy(true);
       setError('');
-      await post<{ message: string }>('/auth/login', { username, password });
+      // The login response includes the username, but we navigate to "/"
+      // and let the Layout component verify the session via /api/auth/me.
+      // The Layout now has a proper loading state so it won't bounce the
+      // user back to /login while the auth check is in flight.
+      await post<{ message: string; username: string }>('/auth/login', { username, password });
       navigate('/');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'تعذر تسجيل الدخول');
@@ -80,13 +84,32 @@ function LoginPage() {
 /* -------------------------------------------------------------------------- */
 
 function Layout() {
+  // Three auth states: 'loading' (check in flight), 'authenticated', 'unauthenticated'.
+  // Previously, user started as null and the Layout immediately rendered
+  // <NavigateToLogin /> before the /api/auth/me check could complete. This
+  // caused a race condition where, after a successful login, the user was
+  // bounced back to /login because the auth check hadn't resolved yet.
   const [user, setUser] = useState<string | null>(null);
+  const [authState, setAuthState] = useState<'loading' | 'authenticated' | 'unauthenticated'>('loading');
   const navigate = useNavigate();
 
   useEffect(() => {
+    let cancelled = false;
     get<{ username: string }>('/auth/me')
-      .then((data) => setUser(data.username))
-      .catch(() => setUser(null));
+      .then((data) => {
+        if (!cancelled) {
+          setUser(data.username);
+          setAuthState('authenticated');
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAuthState('unauthenticated');
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   async function logout() {
@@ -96,10 +119,22 @@ function Layout() {
       // ignore
     }
     setUser(null);
-    navigate('/login');
+    setAuthState('unauthenticated');
+    navigate('/login', { replace: true });
   }
 
-  if (user === null) {
+  // While the auth check is in flight, show a loading indicator instead of
+  // redirecting. This prevents the race condition that bounced users back to
+  // /login immediately after a successful login.
+  if (authState === 'loading') {
+    return (
+      <div className="center-container" role="status" aria-live="polite">
+        <p>جارٍ التحقق...</p>
+      </div>
+    );
+  }
+
+  if (authState === 'unauthenticated') {
     return <NavigateToLogin />;
   }
 
