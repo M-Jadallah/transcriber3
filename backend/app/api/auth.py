@@ -39,11 +39,26 @@ def login(payload: LoginRequest, request: Request, response: Response) -> dict:
     if payload.username != admin_username or payload.password != admin_password:
         raise HTTPException(401, "اسم المستخدم أو كلمة المرور غير صحيحة")
 
-    create_session(response, payload.username)
-    # Return the username so the frontend can set its auth state immediately
-    # without relying solely on a follow-up /api/auth/me call (which has a
-    # race condition with the Layout's initial render).
-    return {"message": "تم تسجيل الدخول بنجاح", "username": payload.username}
+    # create_session sets the session and csrf cookies AND returns the
+    # session token. We also return the token in the response body so the
+    # frontend can store it in localStorage and send it via the
+    # Authorization header as a fallback (hybrid auth) — in case the
+    # browser rejects the Set-Cookie header for any reason (Secure flag
+    # issues behind a proxy, SameSite restrictions, etc.).
+    session_token = create_session(response, payload.username)
+
+    # Extract the CSRF token from the session payload so the frontend
+    # can send it in the X-CSRF-Token header for cookie-based requests.
+    from app.core.security import _get_serializer
+    payload_data = _get_serializer().loads(session_token)
+    csrf_token = payload_data.get("csrf", "")
+
+    return {
+        "message": "تم تسجيل الدخول بنجاح",
+        "username": payload.username,
+        "session_token": session_token,
+        "csrf_token": csrf_token,
+    }
 
 
 @router.post("/auth/logout")

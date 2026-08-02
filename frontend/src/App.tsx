@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Link, Outlet, Route, Routes, useNavigate, useParams } from 'react-router-dom';
-import { get, post } from './api';
+import { get, post, setSessionTokens, clearSessionTokens, getSessionToken } from './api';
 import { useFetch } from './hooks/useFetch';
 import FormatTranscriptButton from './components/FormatTranscriptButton';
 import FormattingNavigationLink from './components/FormattingNavigationLink';
@@ -37,11 +37,22 @@ function LoginPage() {
     try {
       setBusy(true);
       setError('');
-      // The login response includes the username, but we navigate to "/"
-      // and let the Layout component verify the session via /api/auth/me.
-      // The Layout now has a proper loading state so it won't bounce the
-      // user back to /login while the auth check is in flight.
-      await post<{ message: string; username: string }>('/auth/login', { username, password });
+      const result = await post<{
+        message: string;
+        username: string;
+        session_token: string;
+        csrf_token: string;
+      }>('/auth/login', { username, password });
+
+      // Store tokens in localStorage for hybrid auth (cookie + header)
+      // This ensures the app works even if the browser rejects the Set-Cookie
+      // header for any reason (Secure flag, SameSite, Domain matching, etc.)
+      if (result.session_token) {
+        setSessionTokens(result.session_token, result.csrf_token || '');
+      }
+
+      // Navigate to the main app. The Layout will verify auth via /auth/me,
+      // which will now succeed because the Authorization header is sent.
       navigate('/');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'تعذر تسجيل الدخول');
@@ -95,6 +106,15 @@ function Layout() {
 
   useEffect(() => {
     let cancelled = false;
+    // If we have a session token in localStorage, optimistically assume
+    // we're authenticated while the /auth/me check runs. This eliminates
+    // the loading flash after login.
+    const hasStoredToken = !!getSessionToken();
+    if (!hasStoredToken) {
+      // No stored token — skip the optimistic state, just check the cookie
+      setAuthState('loading');
+    }
+
     get<{ username: string }>('/auth/me')
       .then((data) => {
         if (!cancelled) {
@@ -104,6 +124,8 @@ function Layout() {
       })
       .catch(() => {
         if (!cancelled) {
+          // Clear any stale tokens
+          clearSessionTokens();
           setAuthState('unauthenticated');
         }
       });
@@ -118,6 +140,7 @@ function Layout() {
     } catch {
       // ignore
     }
+    clearSessionTokens();
     setUser(null);
     setAuthState('unauthenticated');
     navigate('/login', { replace: true });
