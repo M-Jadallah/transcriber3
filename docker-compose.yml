@@ -12,7 +12,11 @@ x-data-environment: &data-environment
   APP_ENV: ${APP_ENV:-production}
   TZ: ${TZ:-Asia/Amman}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
-  DATABASE_URL: "postgresql://${POSTGRES_USER:-youtube_transcriber}:${SERVICE_PASSWORD_64_POSTGRES}@postgres:5432/${POSTGRES_DB:-youtube_transcriber}"
+  # Use the postgresql+psycopg:// dialect prefix so SQLAlchemy selects the
+  # psycopg3 driver (psycopg[binary], installed in requirements.txt) instead
+  # of the default psycopg2 driver, which is NOT installed. Using the bare
+  # postgresql:// prefix causes: ModuleNotFoundError: No module named 'psycopg2'
+  DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-youtube_transcriber}:${SERVICE_PASSWORD_64_POSTGRES}@postgres:5432/${POSTGRES_DB:-youtube_transcriber}"
   REDIS_URL: "redis://:${SERVICE_PASSWORD_64_REDIS}@redis:6379/0"
 
 x-transcription-environment: &transcription-environment
@@ -183,7 +187,9 @@ services:
       APP_ENV: ${APP_ENV:-production}
       TZ: ${TZ:-Asia/Amman}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-youtube_transcriber}:${SERVICE_PASSWORD_64_POSTGRES}@postgres:5432/${POSTGRES_DB:-youtube_transcriber}"
+      # Use the postgresql+psycopg:// dialect prefix so SQLAlchemy selects
+      # psycopg3 (installed) rather than the uninstalled psycopg2 driver.
+      DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-youtube_transcriber}:${SERVICE_PASSWORD_64_POSTGRES}@postgres:5432/${POSTGRES_DB:-youtube_transcriber}"
     command: ["sh", "-c", "python -m app.db_wait && exec alembic upgrade head"]
     depends_on:
       postgres:
