@@ -13,8 +13,14 @@ def _database_url() -> str:
     value = os.getenv("DATABASE_URL", "").strip()
     if not value:
         raise RuntimeError("DATABASE_URL is required")
+    # SQLAlchemy does not understand the legacy Heroku-style postgres:// prefix.
     if value.startswith("postgres://"):
         value = "postgresql://" + value[len("postgres://"):]
+    # Normalize the bare postgresql:// prefix to postgresql+psycopg:// so
+    # SQLAlchemy selects the psycopg3 driver (this project does not install
+    # psycopg2). psycopg3's connect() accepts the same URL shape.
+    if value.startswith("postgresql://"):
+        value = "postgresql+psycopg://" + value[len("postgresql://"):]
     return value
 
 
