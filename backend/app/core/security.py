@@ -99,8 +99,34 @@ def create_session(response: Response, username: str) -> str:
 
 
 def _get_session_payload(request: Request) -> dict[str, Any]:
-    """Extract and validate the session payload from the request."""
+    """Extract and validate the session payload from the request.
+
+    Supports TWO authentication mechanisms (hybrid auth):
+
+    1. Cookie-based: the ``session`` cookie set by ``create_session``.
+       This is the primary mechanism and works for browser sessions where
+       cookies are properly stored and sent.
+
+    2. Authorization header: ``Authorization: Bearer <token>``. This is
+       a fallback for cases where cookies are not being stored/sent
+       correctly (e.g. due to browser cookie policy, Secure flag issues
+       behind a proxy, or SameSite restrictions). The frontend stores
+       the session token in localStorage after login and sends it in
+       the Authorization header on every request.
+
+    The token format is identical for both mechanisms (a signed
+    URLSafeTimedSerializer payload), so the same session works
+    regardless of how it's transmitted.
+    """
+    # Try cookie first (primary mechanism)
     token = request.cookies.get(SESSION_COOKIE_NAME)
+
+    # Fallback: Authorization: Bearer <token> header
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+
     if not token:
         raise HTTPException(401, "غير مسجل الدخول")
 
@@ -125,8 +151,28 @@ def require_auth(request: Request) -> str:
 
 
 def require_csrf(request: Request) -> str:
-    """Validate CSRF token and return the authenticated username."""
+    """Validate CSRF token and return the authenticated username.
+
+    When using header-based auth (Authorization: Bearer), CSRF protection
+    is inherently satisfied because the browser does not automatically
+    attach the Authorization header to cross-site requests (unlike
+    cookies). So if the request is authenticated via the header (not
+    cookie), we skip the CSRF check.
+
+    When using cookie-based auth, the CSRF token must be present in
+    either the csrf_token cookie or the X-CSRF-Token header.
+    """
+    # Check if the request is using header-based auth
+    auth_header = request.headers.get("Authorization", "")
+    using_header_auth = auth_header.startswith("Bearer ")
+
     payload = _get_session_payload(request)
+
+    # Header-based auth: CSRF is inherently protected, skip the check
+    if using_header_auth:
+        return str(payload["username"])
+
+    # Cookie-based auth: require CSRF token validation
     csrf_cookie = request.cookies.get(CSRF_COOKIE_NAME, "")
     csrf_header = request.headers.get("X-CSRF-Token", "")
     expected_csrf = payload.get("csrf", "")
