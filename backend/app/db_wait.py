@@ -16,11 +16,15 @@ def _database_url() -> str:
     # SQLAlchemy does not understand the legacy Heroku-style postgres:// prefix.
     if value.startswith("postgres://"):
         value = "postgresql://" + value[len("postgres://"):]
-    # Normalize the bare postgresql:// prefix to postgresql+psycopg:// so
-    # SQLAlchemy selects the psycopg3 driver (this project does not install
-    # psycopg2). psycopg3's connect() accepts the same URL shape.
-    if value.startswith("postgresql://"):
-        value = "postgresql+psycopg://" + value[len("postgresql://"):]
+    # psycopg3 (used directly here, NOT through SQLAlchemy) only accepts the
+    # bare postgresql:// prefix. SQLAlchemy's postgresql+psycopg:// prefix is
+    # NOT understood by psycopg3's connect() and would raise:
+    #   "missing '=' after 'postgresql+psycopg://...' in connection info string"
+    # So if the URL uses the SQLAlchemy-style prefix, strip the driver suffix
+    # for psycopg3's direct use. The SQLAlchemy engine in app.core.db still
+    # uses the postgresql+psycopg:// prefix via its own _database_url().
+    if value.startswith("postgresql+psycopg://"):
+        value = "postgresql://" + value[len("postgresql+psycopg://"):]
     return value
 
 
