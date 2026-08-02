@@ -23,7 +23,7 @@
 const API_BASE = '/api';
 const SESSION_TOKEN_KEY = 'transcriber3_session_token';
 const CSRF_TOKEN_KEY = 'transcriber3_csrf_token';
-const REQUEST_TIMEOUT_MS = 15000;
+const REQUEST_TIMEOUT_MS = 10000;
 
 class ApiError extends Error {
   constructor(
