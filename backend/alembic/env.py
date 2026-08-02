@@ -27,6 +27,13 @@ def _database_url() -> str:
     # SQLAlchemy does not understand the legacy Heroku-style postgres:// prefix.
     if value.startswith("postgres://"):
         value = "postgresql://" + value[len("postgres://") :]
+
+    # SQLAlchemy maps the bare postgresql:// prefix to the psycopg2 driver by
+    # default. This project installs psycopg3 (psycopg[binary]) only, so we
+    # rewrite the URL to use the psycopg3 driver explicitly. Without this,
+    # create_engine() raises: ModuleNotFoundError: No module named 'psycopg2'.
+    if value.startswith("postgresql://"):
+        value = "postgresql+psycopg://" + value[len("postgresql://") :]
     return value
 
 
