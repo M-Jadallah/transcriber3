@@ -550,7 +550,8 @@ class VerifyCoolifyBundleTests(unittest.TestCase):
         self.assertEqual(_validate_proxy_contract(ROOT), [])
 
         backend_source = (ROOT / "backend/Dockerfile").read_text(encoding="utf-8")
-        frontend_source = (ROOT / "frontend/Dockerfile").read_text(encoding="utf-8")
+        frontend_dockerfile_source = (ROOT / "frontend/Dockerfile").read_text(encoding="utf-8")
+        nginx_source = (ROOT / "frontend/nginx.conf").read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / "backend").mkdir()
@@ -562,8 +563,9 @@ class VerifyCoolifyBundleTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            (root / "frontend/Dockerfile").write_text(
-                frontend_source.replace(
+            (root / "frontend/Dockerfile").write_text(frontend_dockerfile_source, encoding="utf-8")
+            (root / "frontend/nginx.conf").write_text(
+                nginx_source.replace(
                     "proxy_set_header X-Forwarded-For $remote_addr;",
                     "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
                 ),
@@ -576,10 +578,10 @@ class VerifyCoolifyBundleTests(unittest.TestCase):
             self.assertTrue(any("append or reuse" in error for error in errors))
 
             (root / "backend/Dockerfile").write_text(backend_source, encoding="utf-8")
-            (root / "frontend/Dockerfile").write_text(
-                frontend_source.replace(
-                    "proxy_pass http://api:8000;",
-                    "proxy_pass http://api:8000;\n        proxy_pass http://other:8000;",
+            (root / "frontend/nginx.conf").write_text(
+                nginx_source.replace(
+                    'set $api_upstream "api:8000";\n            proxy_pass http://$api_upstream;',
+                    'set $api_upstream "api:8000";\n            proxy_pass http://$api_upstream;\n        proxy_pass http://other:8000;',
                 ),
                 encoding="utf-8",
             )
