@@ -208,7 +208,13 @@ services:
       SESSION_IDLE_MINUTES: ${SESSION_IDLE_MINUTES:-120}
       COOKIE_SECURE: "true"
       TRUSTED_HOSTS: ${TRUSTED_HOSTS:?Set the public domain and health-check host}
-      FORWARDED_ALLOW_IPS: ${GATEWAY_PEER_IP:-172.29.0.2}
+      # Gateway peer IP defaults to 10.99.42.2 to avoid collisions with
+      # Docker's default bridge range (172.17.0.0/16 .. 172.31.0.0/16).
+      # The 10.99.42.0/24 range is RFC 1918 private space, outside Docker's
+      # default allocation pool, which eliminates "Address already in use"
+      # errors observed when Coolify redeploys with the previous 172.29.0.0/24
+      # subnet that overlapped with other networks on the host.
+      FORWARDED_ALLOW_IPS: ${GATEWAY_PEER_IP:-10.99.42.2}
       WORKER_NAME: api
       FORMATTING_ROOT: /data/formatting
       OPENCODE_INTERNAL_URL: http://opencode-runtime:4096
@@ -607,7 +613,12 @@ services:
     networks:
       edge:
       gateway:
-        ipv4_address: ${GATEWAY_PEER_IP:-172.29.0.2}
+        # Static IP avoids depending on Docker's IPAM ordering for
+        # FORWARDED_ALLOW_IPS trust in the API service. The default
+        # 10.99.42.2 lives in 10.99.42.0/24, intentionally outside Docker's
+        # default 172.x bridge allocation range to prevent the
+        # "Address already in use" error observed during Coolify redeployments.
+        ipv4_address: ${GATEWAY_PEER_IP:-10.99.42.2}
     depends_on:
       api:
         condition: service_healthy
@@ -657,7 +668,13 @@ networks:
     internal: true
     ipam:
       config:
-        - subnet: ${GATEWAY_NETWORK_SUBNET:-172.29.0.0/24}
+        # 10.99.42.0/24 is RFC 1918 private space outside Docker's default
+        # 172.16.0.0/12 bridge allocation range. This eliminates subnet overlap
+        # with unrelated Coolify-managed or user-defined networks that previously
+        # caused "Address already in use" during redeployment. Override with the
+        # GATEWAY_NETWORK_SUBNET env var if this range is already in use on the
+        # host; remember to also override GATEWAY_PEER_IP to a usable host.
+        - subnet: ${GATEWAY_NETWORK_SUBNET:-10.99.42.0/24}
   data:
     internal: true
   formatting-control:
